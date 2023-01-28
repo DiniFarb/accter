@@ -15,8 +15,7 @@ package main
 
 import (
 	"fmt"
-
-	"github.com/dinifarb/accter/pkg/accter"
+	"github.com/dinifarb/accter"
 )
 
 func main() {
