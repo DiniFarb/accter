@@ -86,5 +86,5 @@ func parseIPAddr(b []byte) string {
 	}
 	bs := make([]byte, net.IPv4len)
 	copy(bs, b)
-	return net.IP(b).String()
+	return net.IP(bs).String()
 }
