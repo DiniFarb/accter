@@ -21,29 +21,45 @@ const (
 	testSessionId     = "t-800"
 )
 
-var once sync.Once
-
 func GetTestPacket(id byte) []byte {
 	decodedByteArray, _ := hex.DecodeString(fmt.Sprintf(testHexStr, hex.EncodeToString([]byte{id})))
 	return decodedByteArray
 }
 
 func ExchangePacket(ctx context.Context, b []byte, addr string) (Code, error) {
-	conn, err := net.Dial("udp", addr)
+	d := &net.Dialer{}
+	conn, err := d.DialContext(ctx, "udp", addr)
 	if err != nil {
 		return 0, err
 	}
 	defer conn.Close()
-	conn.Write(b)
-	p := make([]byte, 2048)
-	_, err = bufio.NewReader(conn).Read(p)
+	_, err = conn.Write(b)
 	if err != nil {
 		return 0, err
 	}
-	if err := CheckAuthenticator(b[4:20], p); err != nil {
-		return 0, err
+	done := make(chan struct{})
+	var packetError error
+	var code Code
+	go func(e error, c Code) {
+		defer close(done)
+		p := make([]byte, 4096)
+		_, err = bufio.NewReader(conn).Read(p)
+		if err != nil {
+			packetError = err
+			return
+		}
+		if err := CheckAuthenticator(b[4:20], p); err != nil {
+			packetError = err
+			return
+		}
+		code = Code(p[0])
+	}(packetError, code)
+	select {
+	case <-done:
+		return code, packetError
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
-	return Code(p[0]), nil
 }
 
 /*
@@ -69,20 +85,19 @@ func CheckAuthenticator(sendAuthenticator, p []byte) error {
 	return nil
 }
 
-func StartTestServer(f func(packet *JsonPacket) error) {
-	once.Do(func() {
-		server := PacketServer{
-			Port:          1813,
-			Secret:        "secret",
-			HandleRequest: f,
+func StartTestServer(f func(packet *JsonPacket) error, r bool) {
+	server := &PacketServer{
+		Port:                1813,
+		Secret:              "secret",
+		HandleRequest:       f,
+		AllowRetransmission: r,
+	}
+	server.Logger.level = 1
+	go func(server *PacketServer) {
+		if err := server.Serve(); err != nil {
+			panic("error starting server: " + err.Error())
 		}
-		server.Logger.level = 1
-		go func(server PacketServer) {
-			if err := server.Serve(); err != nil {
-				panic("error starting server: " + err.Error())
-			}
-		}(server)
-	})
+	}(server)
 }
 
 func TestOneRequest(t *testing.T) {
@@ -99,8 +114,7 @@ func TestOneRequest(t *testing.T) {
 		}
 		return nil
 	}
-	StartTestServer(handler)
-	time.Sleep(1 * time.Second)
+	StartTestServer(handler, false)
 	id := byte(1)
 	testPacket := GetTestPacket(id)
 	response, err := ExchangePacket(context.Background(), testPacket, "localhost:1813")
@@ -122,16 +136,61 @@ func TestOneRequest(t *testing.T) {
 	}
 }
 
+func TestRetransRequest(t *testing.T) {
+	var gotAuthenticator string
+	var gotId string
+	var gotSessionId string
+	handler := func(packet *JsonPacket) error {
+		gotAuthenticator = packet.Authenticator
+		gotId = packet.Id
+		for _, attr := range packet.Attributes {
+			if attr.Name == "Acct-Session-Id" {
+				gotSessionId = attr.Value
+			}
+		}
+		return nil
+	}
+	StartTestServer(handler, false)
+	id := byte(1)
+	testPacket := GetTestPacket(id)
+	response, err := ExchangePacket(context.Background(), testPacket, "localhost:1813")
+	if err != nil {
+		t.Errorf(err.Error())
+	}
+	wantResp := CodeAccountingResponse
+	if response != wantResp {
+		t.Errorf("response.Code = %q, want %q", response, wantResp)
+	}
+	if gotAuthenticator != testAuthenticator {
+		t.Errorf("Authenticator = %q, want %q", gotAuthenticator, testAuthenticator)
+	}
+	if gotId != fmt.Sprintf("%#x", id) {
+		t.Errorf("Id = %q, want %q", gotId, string(id))
+	}
+	if gotSessionId != testSessionId {
+		t.Errorf("Acct-Session-Id = %q, want %q", gotSessionId, testSessionId)
+	}
+	c, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	e, err := ExchangePacket(c, testPacket, "localhost:1813")
+	fmt.Println(e)
+	if err.Error() != "context deadline exceeded" {
+		t.Errorf("timeout.res = %q, want (context deadline exceeded)", err.Error())
+	}
+	defer cancel()
+}
+
 func TestManyRequest(t *testing.T) {
 	handler := func(packet *JsonPacket) error {
 		return nil
 	}
-	StartTestServer(handler)
-	time.Sleep(1 * time.Second)
-	for i := 0; i < 1000; i++ {
-		id := byte(i)
-		testPacket := GetTestPacket(id)
-		go func() {
+	StartTestServer(handler, false)
+	wg := new(sync.WaitGroup)
+	wg.Add(50)
+	for i := 0; i < 50; i++ {
+		go func(i int) {
+			defer wg.Done()
+			id := byte(i)
+			testPacket := GetTestPacket(id)
 			response, err := ExchangePacket(context.Background(), testPacket, "localhost:1813")
 			if err != nil {
 				t.Errorf(err.Error())
@@ -140,6 +199,33 @@ func TestManyRequest(t *testing.T) {
 			if response != want {
 				t.Errorf("response.Code = %q, want %q", response, want)
 			}
-		}()
+		}(i)
 	}
+	wg.Wait()
+}
+
+func TestAllowRetrans(t *testing.T) {
+	handler := func(packet *JsonPacket) error {
+		return nil
+	}
+	StartTestServer(handler, true)
+	wg := new(sync.WaitGroup)
+	wg.Add(5)
+	for i := 0; i < 5; i++ {
+		go func(i int) {
+			defer wg.Done()
+			id := byte(1)
+			testPacket := GetTestPacket(id)
+			response, err := ExchangePacket(context.Background(), testPacket, "localhost:1813")
+			if err != nil {
+				t.Errorf(err.Error())
+			}
+			want := CodeAccountingResponse
+			fmt.Println(i, response)
+			if response != want {
+				t.Errorf("response.Code = %q, want %q", response, want)
+			}
+		}(i)
+	}
+	wg.Wait()
 }

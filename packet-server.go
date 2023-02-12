@@ -11,11 +11,12 @@ import (
 const NETWORK_TYPE = "udp"
 
 type PacketServer struct {
-	Port           int
-	Secret         string
-	Retransmission RetransmissionHandler
-	HandleRequest  func(*JsonPacket) error
-	Logger         Logger
+	Port                int
+	Secret              string
+	AllowRetransmission bool
+	Retransmission      RetransmissionHandler
+	HandleRequest       func(*JsonPacket) error
+	Logger              Logger
 }
 
 func (s *PacketServer) Serve() error {
@@ -32,7 +33,7 @@ func (s *PacketServer) Serve() error {
 			level:      Info,
 		}
 	}
-	if s.Retransmission == nil {
+	if s.Retransmission == nil && !s.AllowRetransmission {
 		s.Retransmission = CreateLocalRetransmissionHandler()
 	}
 	if s.Port == 0 {
@@ -91,14 +92,15 @@ func (s *PacketServer) handlePacket(b []byte, remoteAddr net.Addr) ([]byte, erro
 		err := fmt.Errorf("[packet-%#x] only accounting request is supported", b[1])
 		return nil, err
 	}
-	s.Logger.trace(fmt.Sprintf("[packet-%#x] checking retransmission key: %s", b[1], jsonPacket.Key))
-	isRetry := s.Retransmission.IsRetransmission(jsonPacket.Key)
-	if isRetry {
-		// TODO: Add Option to allow retransmission
-		s.Logger.debug(fmt.Sprintf("[packet-%#x] retransmission detected with key: %s", b[0], jsonPacket.Key))
-		return nil, nil
-	} else {
-		s.Retransmission.AddToCache(jsonPacket.Key)
+	if !s.AllowRetransmission {
+		s.Logger.trace(fmt.Sprintf("[packet-%#x] checking retransmission key: %s", b[1], jsonPacket.Key))
+		isRetry := s.Retransmission.IsRetransmission(jsonPacket.Key)
+		if isRetry {
+			s.Logger.debug(fmt.Sprintf("[packet-%#x] retransmission detected with key: %s", b[0], jsonPacket.Key))
+			return nil, nil
+		} else {
+			s.Retransmission.AddToCache(jsonPacket.Key)
+		}
 	}
 	s.Logger.trace(fmt.Sprintf("[packet-%#x] transform attributes as strings", b[1]))
 	for _, v := range packet.Attributes {
