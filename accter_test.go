@@ -91,13 +91,14 @@ func StartTestServer(f func(packet *JsonPacket) error, r bool) {
 		Secret:              "secret",
 		HandleRequest:       f,
 		AllowRetransmission: r,
+		LogLevel:            Trace,
 	}
-	server.Logger.level = 1
 	go func(server *PacketServer) {
 		if err := server.Serve(); err != nil {
 			panic("error starting server: " + err.Error())
 		}
 	}(server)
+	time.Sleep(100 * time.Millisecond)
 }
 
 func TestOneRequest(t *testing.T) {
@@ -228,4 +229,47 @@ func TestAllowRetrans(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestShutdownRequest(t *testing.T) {
+	reqs := make([]JsonPacket, 50)
+	handler := func(packet *JsonPacket) error {
+		time.Sleep(5 * time.Second)
+		reqs = append(reqs, *packet)
+		return nil
+	}
+	wg := new(sync.WaitGroup)
+	server := &PacketServer{
+		Port:          1813,
+		Secret:        "secret",
+		HandleRequest: handler,
+		LogLevel:      Trace,
+	}
+	go func(server *PacketServer) {
+		defer wg.Done()
+		if err := server.Serve(); err != nil {
+			panic("error starting server: " + err.Error())
+		}
+	}(server)
+	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < 3; i++ {
+		go func(i int) {
+			defer wg.Done()
+			id := byte(i)
+			testPacket := GetTestPacket(id)
+			response, err := ExchangePacket(context.Background(), testPacket, "localhost:1813")
+			if err != nil {
+				t.Errorf(err.Error())
+			}
+			want := CodeAccountingResponse
+			if response != want {
+				t.Errorf("response.Code = %q, want %q", response, want)
+			}
+		}(i)
+	}
+	go server.Shutdown()
+	wg.Wait()
+	if len(reqs) != 50 {
+		t.Errorf("reqs = %q, want %q", len(reqs), 50)
+	}
 }

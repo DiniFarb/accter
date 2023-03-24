@@ -2,6 +2,7 @@ package accter
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -14,7 +15,8 @@ type Logger struct {
 type Level int
 
 const (
-	Error Level = iota
+	_ Level = iota
+	Error
 	Warn
 	Info
 	Debug
@@ -57,4 +59,18 @@ func (l *Logger) createTimeStamp() string {
 
 func (l *Logger) log(message string) {
 	fmt.Printf("[%s]%s\n", l.appName, message)
+}
+
+var logger *Logger
+
+var once sync.Once
+
+func CreateLogger(level Level) {
+	once.Do(func() {
+		logger = &Logger{
+			timeformat: "2006-01-02 15:04:05.000",
+			appName:    "ACCTER",
+			level:      level,
+		}
+	})
 }

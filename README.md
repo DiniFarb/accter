@@ -28,7 +28,7 @@ func main() {
 		for _, attr := range packet.Attributes {
 			fmt.Println(attr.Name, "=", attr.Value)
 		}
-		// return an error if no accounting data should be sent to the origin server
+		// return an error if no accounting response should be sent to the origin server
 		return nil
 	}
 	server := accter.PacketServer{
